@@ -11,12 +11,13 @@ from pdfminer import psparser
 from pdfminer.high_level import extract_pages
 from PIL import Image, ImageSequence
 
+from unstructured_inference.config import inference_config
 from unstructured_inference.constants import Source
 from unstructured_inference.inference.elements import (
     EmbeddedTextRegion,
     ImageTextRegion,
     Rectangle,
-    TextRegion,
+    TextRegion, region_bounding_boxes_are_almost_the_same, grow_region_to_match_region,
 )
 from unstructured_inference.inference.layoutelement import (
     LayoutElement,
@@ -100,7 +101,7 @@ class DocumentLayout:
             if fixed_layouts is None:
                 fixed_layouts = [None for _ in layouts]
             for i, (image_path, layout, fixed_layout) in enumerate(
-                zip(image_paths, layouts, fixed_layouts),
+                    zip(image_paths, layouts, fixed_layouts),
             ):
                 # NOTE(robinson) - In the future, maybe we detect the page number and default
                 # to the index if it is not detected
@@ -176,6 +177,7 @@ class PageLayout:
         element_extraction_model: Optional[UnstructuredElementExtractionModel] = None,
         extract_tables: bool = False,
         analysis: bool = False,
+        merge_layout_v2: bool = False,
     ):
         if detection_model is not None and element_extraction_model is not None:
             raise ValueError("Only one of detection_model and extraction_model should be passed.")
@@ -194,6 +196,7 @@ class PageLayout:
         self.extract_tables = extract_tables
         self.analysis = analysis
         self.inferred_layout: Optional[List[LayoutElement]] = None
+        self.merge_layout_v2 = merge_layout_v2
 
     def __str__(self) -> str:
         return "\n\n".join([str(element) for element in self.elements])
@@ -242,12 +245,20 @@ class PageLayout:
                 and "R_50" not in self.detection_model.model_path
             ):
                 threshold_kwargs = {"same_region_threshold": 0.5, "subregion_threshold": 0.5}
-            merged_layout = merge_inferred_layout_with_extracted_layout(
-                inferred_layout=inferred_layout,
-                extracted_layout=self.layout,
-                page_image_size=self.image.size,
-                **threshold_kwargs,
-            )
+            if self.merge_layout_v2:
+                merged_layout = merge_inferred_layout_with_extracted_layout_v2(
+                    inferred_layout=inferred_layout,
+                    extracted_layout=self.layout,
+                    page_image_size=self.image.size,
+                    **threshold_kwargs,
+                )
+            else:
+                merged_layout = merge_inferred_layout_with_extracted_layout(
+                    inferred_layout=inferred_layout,
+                    extracted_layout=self.layout,
+                    page_image_size=self.image.size,
+                    **threshold_kwargs,
+                )
 
         else:
             merged_layout = inferred_layout
@@ -404,6 +415,7 @@ class PageLayout:
         extract_images_in_pdf: bool = False,
         image_output_dir_path: Optional[str] = None,
         analysis: bool = False,
+        merge_layout_v2: bool = False
     ):
         """Creates a PageLayout from an already-loaded PIL Image."""
 
@@ -415,6 +427,7 @@ class PageLayout:
             element_extraction_model=element_extraction_model,
             extract_tables=extract_tables,
             analysis=analysis,
+            merge_layout_v2=merge_layout_v2
         )
         if page.element_extraction_model is not None:
             page.get_elements_using_image_extraction()
@@ -592,3 +605,67 @@ def load_pdf(
         )
 
     return layouts, images
+
+
+def merge_inferred_layout_with_extracted_layout_v2(
+    inferred_layout: Collection[LayoutElement],
+    extracted_layout: Collection[TextRegion],
+    page_image_size: tuple,
+    same_region_threshold: float = inference_config.LAYOUT_SAME_REGION_THRESHOLD,
+    subregion_threshold: float = inference_config.LAYOUT_SUBREGION_THRESHOLD,
+) -> List[LayoutElement]:
+    result_list: List[LayoutElement] = []
+    regions_to_remove = []
+    for inferred_region in inferred_layout:
+        if inferred_region.type == "Picture":
+            result_list.append(inferred_region)
+            continue
+        for extracted_region in extracted_layout:
+            if inferred_region.intersects(extracted_region):
+                if extracted_region in regions_to_remove:
+                    continue
+                # 区域边界框几乎相同
+                same_bbox = region_bounding_boxes_are_almost_the_same(
+                    inferred_region,
+                    extracted_region,
+                    same_region_threshold,
+                )
+                # 推断区域是提取的子区域
+                inferred_is_subregion_of_extracted = inferred_region.is_almost_subregion_of(
+                    extracted_region,
+                    subregion_threshold=subregion_threshold,
+                )
+                # 推断是文本
+                # inferred_is_text = inferred_region.type not in (
+                #     "Figure",
+                #     "Image",
+                #     "PageBreak",
+                #     "Table",
+                # )
+                inferred_is_text = True
+                # 提取是推断的子区域 extracted_region <= inferred_region
+                extracted_is_subregion_of_inferred = extracted_region.is_almost_subregion_of(
+                    inferred_region,
+                    subregion_threshold=subregion_threshold,
+                )
+                if same_bbox or (inferred_is_subregion_of_extracted and inferred_is_text):
+                    # 修改推断区域的坐标 or 推断区域是提取的子区域
+                    # 将推断区域的位置扩大为提取区域
+                    grow_region_to_match_region(inferred_region, extracted_region)
+                    inferred_region.text = extracted_region.text
+                    result_list.append(inferred_region)
+                    regions_to_remove.append(extracted_region)
+                elif extracted_is_subregion_of_inferred and inferred_is_text:
+                    # 提取局域是推断的子区域
+                    # keep inferred region, remove extracted region
+                    # grow_region_to_match_region(inferred_region, extracted_region)
+                    if inferred_region.text is None:
+                        inferred_region.text = extracted_region.text
+                        result_list.append(inferred_region)
+                    else:
+                        inferred_region.text += extracted_region.text
+                    # new_lay = LayoutElement.from_region(extracted_region)
+                    # new_lay.type = inferred_region.type
+                    # new_lay.text = extracted_region.text
+                    regions_to_remove.append(extracted_region)
+    return result_list
