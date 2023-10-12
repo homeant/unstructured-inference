@@ -620,18 +620,18 @@ def merge_inferred_layout_with_extracted_layout_v2(
             result_list.append(inferred_region)
             continue
         for extracted_region in extracted_layout:
-            if inferred_region.intersects(extracted_region):
+            if inferred_region.bbox.intersects(extracted_region.bbox):
                 if extracted_region in regions_to_remove:
                     continue
                 # 区域边界框几乎相同
                 same_bbox = region_bounding_boxes_are_almost_the_same(
-                    inferred_region,
-                    extracted_region,
+                    inferred_region.bbox,
+                    extracted_region.bbox,
                     same_region_threshold,
                 )
                 # 推断区域是提取的子区域
-                inferred_is_subregion_of_extracted = inferred_region.is_almost_subregion_of(
-                    extracted_region,
+                inferred_is_subregion_of_extracted = inferred_region.bbox.is_almost_subregion_of(
+                    extracted_region.bbox,
                     subregion_threshold=subregion_threshold,
                 )
                 # 推断是文本
@@ -643,14 +643,14 @@ def merge_inferred_layout_with_extracted_layout_v2(
                 # )
                 inferred_is_text = True
                 # 提取是推断的子区域 extracted_region <= inferred_region
-                extracted_is_subregion_of_inferred = extracted_region.is_almost_subregion_of(
-                    inferred_region,
+                extracted_is_subregion_of_inferred = extracted_region.bbox.is_almost_subregion_of(
+                    inferred_region.bbox,
                     subregion_threshold=subregion_threshold,
                 )
                 if same_bbox or (inferred_is_subregion_of_extracted and inferred_is_text):
                     # 修改推断区域的坐标 or 推断区域是提取的子区域
                     # 将推断区域的位置扩大为提取区域
-                    grow_region_to_match_region(inferred_region, extracted_region)
+                    grow_region_to_match_region(inferred_region.bbox, extracted_region.bbox)
                     inferred_region.text = extracted_region.text
                     result_list.append(inferred_region)
                     regions_to_remove.append(extracted_region)
