@@ -97,10 +97,11 @@ class DocumentLayout:
                 )
 
             pages: List[PageLayout] = []
+            pdf = pdfplumber.open(filename)
             if fixed_layouts is None:
                 fixed_layouts = [None for _ in layouts]
-            for i, (image_path, layout, fixed_layout) in enumerate(
-                zip(image_paths, layouts, fixed_layouts),
+            for i, (image_path, layout, fixed_layout, pdf_page) in enumerate(
+                zip(image_paths, layouts, fixed_layouts, pdf.pages),
             ):
                 # NOTE(robinson) - In the future, maybe we detect the page number and default
                 # to the index if it is not detected
@@ -114,9 +115,11 @@ class DocumentLayout:
                         layout=layout,
                         fixed_layout=fixed_layout,
                         extract_tables=extract_tables,
+                        pdf_page=pdf_page,
                         **kwargs,
                     )
                     pages.append(page)
+            pdf.close()
             return cls.from_pages(pages)
 
     @classmethod
@@ -177,6 +180,7 @@ class PageLayout:
         extract_tables: bool = False,
         analysis: bool = False,
         merge_layout_v2: bool = False,
+        pdf_page: pdfplumber.pdf.Page = None,
     ):
         if detection_model is not None and element_extraction_model is not None:
             raise ValueError("Only one of detection_model and extraction_model should be passed.")
@@ -199,6 +203,7 @@ class PageLayout:
         # the bbox property optional
         self.inferred_layout: Optional[List[LayoutElement]] = None
         self.merge_layout_v2 = merge_layout_v2
+        self.pdf_page = pdf_page
 
     def __str__(self) -> str:
         return "\n\n".join([str(element) for element in self.elements])
@@ -261,6 +266,23 @@ class PageLayout:
                     page_image_size=self.image.size,
                     **threshold_kwargs,
                 )
+
+            if self.pdf_page:
+                pad_text: str = self.pdf_page.extract_text(layout=True)
+                for index, layout in enumerate(merged_layout[1:], start=1):
+                    if layout.type == "Table":
+                        pre_layout = merged_layout[index-1]
+                        pre_text = pre_layout.text.strip().splitlines()[0]
+                        start = pad_text.find(pre_text) + len(pre_text)
+                        if index < len(merged_layout)-1:
+                            next_layout = merged_layout[index+1]
+                            next_text = next_layout.text.strip().splitlines()[0]
+                            end = pad_text.find(next_text)
+                            if start >= 0 and end >= 0:
+                                layout.text = pad_text[start:end]
+                        elif start >= 0:
+                            layout.text = pad_text[start:]
+
 
         else:
             merged_layout = inferred_layout
@@ -414,7 +436,8 @@ class PageLayout:
         extract_images_in_pdf: bool = False,
         image_output_dir_path: Optional[str] = None,
         analysis: bool = False,
-        merge_layout_v2: bool = False
+        merge_layout_v2: bool = False,
+        pdf_page: pdfplumber.pdf.Page = None,
     ):
         """Creates a PageLayout from an already-loaded PIL Image."""
 
@@ -426,7 +449,8 @@ class PageLayout:
             element_extraction_model=element_extraction_model,
             extract_tables=extract_tables,
             analysis=analysis,
-            merge_layout_v2=merge_layout_v2
+            merge_layout_v2=merge_layout_v2,
+            pdf_page=pdf_page
         )
         if page.element_extraction_model is not None:
             page.get_elements_using_image_extraction()

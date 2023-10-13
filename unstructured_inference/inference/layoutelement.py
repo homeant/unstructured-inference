@@ -37,11 +37,15 @@ class LayoutElement(TextRegion):
         image: Optional[Image.Image] = None,
         extract_tables: bool = False,
     ):
+        old_text = self.text
         """Extracts text contained in region"""
         text = super().extract_text(
             objects=objects,
             extract_tables=extract_tables,
         )
+        if not extract_tables and self.type == "Table":
+            self.text = old_text
+            return old_text
         if extract_tables and self.type == "Table":
             self.text_as_html = interpret_table_block(self, image)
         return text
